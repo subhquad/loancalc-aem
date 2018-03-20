@@ -1,11 +1,14 @@
 package hsbc.core.servlets;
 
 import com.day.cq.commons.jcr.JcrUtil;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import hsbc.core.pojo.CSV;
 import org.apache.commons.io.IOUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.jackrabbit.oak.util.NodeUtil;
 import org.apache.sling.api.SlingHttpServletRequest;
 import org.apache.sling.api.SlingHttpServletResponse;
+import org.apache.sling.api.request.RequestParameter;
 import org.apache.sling.api.resource.Resource;
 import org.apache.sling.api.resource.ResourceResolver;
 import org.apache.sling.api.servlets.HttpConstants;
@@ -21,10 +24,13 @@ import javax.jcr.RepositoryException;
 import javax.servlet.Servlet;
 import javax.servlet.ServletException;
 import java.io.*;
-import java.util.Iterator;
-import java.util.Map;
+import java.nio.charset.StandardCharsets;
+import java.util.*;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 
 
 @Component(service = Servlet.class,
@@ -35,7 +41,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
         })
 public class LoanCalculatorConfigServlet extends SlingAllMethodsServlet {
 
+
     private static final long serialVersionUid = 1L;
+    Logger log = LoggerFactory.getLogger(this.getClass().getName());
 
     @Override
     protected void doGet(final SlingHttpServletRequest request,
@@ -44,19 +52,7 @@ public class LoanCalculatorConfigServlet extends SlingAllMethodsServlet {
             resp.setContentType("text/plain");
             ResourceResolver resourceResolver = request.getResourceResolver();
             Resource pageResource = resourceResolver.resolve(request.getParameter("pagePath") + "/jcr:content");
-            Iterator<Resource> children = pageResource.getChildren().iterator();
-            JSONObject jsonObject = new JSONObject();
-            JSONArray jsonArray=new JSONArray();
-            while (children.hasNext()) {
-                JSONObject jObject = new JSONObject();
-                Node node = children.next().adaptTo(Node.class);
-                jObject.put("configName", node.getName());
-                jObject.put("property_showCurrencyInput", node.hasProperty("property_showCurrencyInput") ? node.getProperty("property_showCurrencyInput").getBoolean() : false);
-                jObject.put("files", "[]");
-                jsonArray.put(jObject);
-            }
-            jsonObject.put("data",jsonArray);
-            resp.getWriter().write(jsonObject.toString());
+            returnJsonResponse(resp, pageResource);
         } catch (RepositoryException e) {
             e.printStackTrace();
         } catch (JSONException e) {
@@ -66,89 +62,106 @@ public class LoanCalculatorConfigServlet extends SlingAllMethodsServlet {
 
     }
 
+    private void returnJsonResponse(SlingHttpServletResponse resp, Resource pageResource) throws JSONException, RepositoryException, IOException {
+        Iterator<Resource> children = pageResource.getChildren().iterator();
+        JSONObject jsonObject = new JSONObject();
+        JSONArray jsonArray = new JSONArray();
+        while (children.hasNext()) {
+            JSONObject jObject = new JSONObject();
+            Node node = children.next().adaptTo(Node.class);
+            jObject.put("configName", node.getName());
+            jObject.put("property_showCurrencyInput", node.hasProperty("property_showCurrencyInput") ? node.getProperty("property_showCurrencyInput").getBoolean() : false);
+            jObject.put("csvFileUpload", node.hasProperty("csvFileUpload") ? "Uploaded" : "No file uploaded yet");
+            jsonArray.put(jObject);
+        }
+        jsonObject.put("data", jsonArray);
+        resp.getWriter().write(jsonObject.toString());
+    }
+
     @Override
     protected void doPost(final SlingHttpServletRequest request,
                           final SlingHttpServletResponse response) throws ServletException, IOException {
-
         try {
-            final String action = request.getParameter("action");
-            PrintWriter writer = response.getWriter();
-
+            Node configNode = null;
             ResourceResolver resourceResolver = request.getResourceResolver();
-
-            if (StringUtils.isNotEmpty(action)) {
-                Resource pageResource = resourceResolver.resolve(request.getParameter("pagePath") + "/jcr:content");
-
+            final boolean isMultipart = org.apache.commons.fileupload.servlet.ServletFileUpload.isMultipartContent(request);
+            PrintWriter out = response.getWriter();
+            if (isMultipart) {
+                final java.util.Map<String, org.apache.sling.api.request.RequestParameter[]> params = request.getRequestParameterMap();
+                final String action = IOUtils.toString(params.get("action")[0].getInputStream());
+                final String pagePath = IOUtils.toString(params.get("pagePath")[0].getInputStream());
+                Resource pageResource = resourceResolver.resolve(pagePath + "/jcr:content");
                 if ("create".equals(action)) {
-
-                    Node pageNode = pageResource.adaptTo(Node.class);
-                    Node configNode = null;
-
-                    String configName = request.getParameter("configName");
-                    String validNodeName = JcrUtil.createValidName(configName);
-                    if (pageNode.hasNode(validNodeName)) {
-                        configNode = pageNode.getNode(validNodeName);
-                    } else {
-                        configNode = pageNode.addNode(validNodeName);
-                    }
-                    configNode.setProperty("configTitle", configName);
-
-                    Map parameterMap = request.getParameterMap();
-
-                    for (Object key : parameterMap.keySet()) {
-                        String keyStr = (String) key;
-                        if (keyStr.startsWith("property")) {
-                            Boolean value = Boolean.parseBoolean(request.getParameter(keyStr));
-                            configNode.setProperty(keyStr, value);
-                            resourceResolver.commit();
-                        }
-
-                    }
-
+                    saveProperties(resourceResolver, params, pageResource);
+                } else if ("edit".equals(action)) {
+                    saveProperties(resourceResolver, params, pageResource);
+                } else if ("delete".equals(action)) {
+                    deleteConfig(resourceResolver, params, pageResource);
                 }
-
-                writer.write("{\"data\":[],\"files\":{\"files\":{\"1\":{\"id\":\"1\",\"filename\":\"image (1).jpg\",\"filesize\":\"74206\",\"web_path\":\"\\/upload\\/1.jpg\",\"system_path\":\"\\/home\\/datat\\/public_html\\/editor\\/upload\\/1.jpg\"}}},\"upload\":{\"id\":\"1\"}}");
-            } else if ("upload".equals(action)) {
-                final boolean isMultipart = org.apache.commons.fileupload.servlet.ServletFileUpload.isMultipartContent(request);
-                PrintWriter out = null;
-
-                out = response.getWriter();
-                if (isMultipart) {
-                    final java.util.Map<String, org.apache.sling.api.request.RequestParameter[]> params = request.getRequestParameterMap();
-                    //for (final java.util.Map.Entry<String, org.apache.sling.api.request.RequestParameter[]> pairs : params.entrySet()) {
-                    //final String k = pairs.getKey();
-
-                    final org.apache.sling.api.request.RequestParameter[] pArr = params.get("csvFileUpload");//.getValue();
-                    final org.apache.sling.api.request.RequestParameter param = pArr[0];
-                    final InputStream stream = param.getInputStream();
-                    String fileContent=IOUtils.toString(stream);
-
-                    //}
-                }
+                returnJsonResponse(response, pageResource);
             }
-        } catch (RepositoryException e) {
-            e.printStackTrace();
+        } catch (Exception e) {
+            log.error(e.getMessage());
         }
     }
-    //Save the uploaded file into the AEM DAM using AssetManager APIs
-        private String writeToDam(InputStream is, String fileName,ResourceResolver  resourceResolver)
-        {
-            try
-            {
 
-                //Use AssetManager to place the file into the AEM DAM
-                com.day.cq.dam.api.AssetManager assetMgr = resourceResolver.adaptTo(com.day.cq.dam.api.AssetManager.class);
-                String newFile = "/content/dam/travel/"+fileName ;
-                assetMgr.createAsset(newFile, is,"image/jpeg", true);
-
-                // Return the path to the file was stored
-                return newFile;
-            }
-            catch(Exception e)
-            {
-                e.printStackTrace();
-            }
-            return null;
+    private void deleteConfig(ResourceResolver resourceResolver, Map<String, RequestParameter[]> params, Resource pageResource) throws IOException, RepositoryException {
+        final String configName = IOUtils.toString(params.get("configName")[0].getInputStream());
+        Node pageNode = pageResource.adaptTo(Node.class);
+        String validNodeName = JcrUtil.createValidName(configName);
+        Node node = pageNode.getNode(validNodeName);
+        if (node != null) {
+            node.remove();
+            resourceResolver.commit();
         }
 
+    }
+
+    private void saveProperties(ResourceResolver resourceResolver, Map<String, RequestParameter[]> params, Resource pageResource) throws IOException, RepositoryException {
+        Node configNode=null;
+        final String configName = IOUtils.toString(params.get("configName")[0].getInputStream());
+        String validNodeName = JcrUtil.createValidName(configName);
+        Node pageNode = pageResource.adaptTo(Node.class);
+        //write all key value pairs to node
+        for (final Map.Entry<String, RequestParameter[]> pairs : params.entrySet()) {
+            final String k = pairs.getKey();
+            final RequestParameter[] pArr = params.get(k);
+            final RequestParameter param = pArr[0];
+            final InputStream stream = param.getInputStream();
+            String content = IOUtils.toString(stream);
+            if (pageNode.hasNode(validNodeName)) {
+                configNode = pageNode.getNode(validNodeName);
+            } else {
+                configNode = pageNode.addNode(validNodeName);
+            }
+
+
+
+            configNode.setProperty(k, content);
+            if(StringUtils.equals(k,"csvFileUpload")){
+                //convertcsvtojson
+                InputStream streams = new ByteArrayInputStream(content.getBytes(StandardCharsets.UTF_8));
+                try (InputStream in = streams) {
+                    CSV csv = new CSV(true, ',', in );
+                    List< String > fieldNames = null;
+                    if (csv.hasNext())
+                        fieldNames = new ArrayList< >(csv.next());
+                    List < Map < String, String >> list = new ArrayList < > ();
+                    while (csv.hasNext()) {
+                        List < String > x = csv.next();
+                        Map < String, String > obj = new LinkedHashMap< >();
+                        for (int i = 0; i < fieldNames.size(); i++) {
+                            obj.put(fieldNames.get(i), x.get(i));
+                        }
+                        list.add(obj);
+                    }
+                    ObjectMapper mapper = new ObjectMapper();
+                    mapper.enable(SerializationFeature.INDENT_OUTPUT);
+                    //mapper.writeValue(System.out, list);
+                    configNode.setProperty("csvFileUploadJSON",mapper.writeValueAsString(list));
+                }
+            }
+            resourceResolver.commit();
+        }
+    }
 }

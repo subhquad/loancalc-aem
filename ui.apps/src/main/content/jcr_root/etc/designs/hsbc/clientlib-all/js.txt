@@ -6,3 +6,6 @@ dataTables.editor.js
 dataTables.buttons.min.js
 dataTables.select.min.js
 loancalculatorconfig.js
+app.bundle.js
+0.dist/app.bundle.js
+1.dist/app.bundle.js
